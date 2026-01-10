@@ -10,7 +10,7 @@
 
 # 忽略dist-info文件夹
 *.dist-info/
-
+*.dist-info
 # 忽略__pycache__文件夹
 __pycache__/
 
@@ -25,3 +25,4 @@ __pycache__/
 # 忽略临时文件
 *.tmp
 *.temp
+
