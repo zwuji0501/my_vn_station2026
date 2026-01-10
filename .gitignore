@@ -1,0 +1,27 @@
+# 不忽略gitignore文件本身
+!.gitignore
+
+# 忽略所有文件和文件夹
+*
+
+# 允许vnpy相关的文件夹
+!vnpy/
+!vnpy_*/
+
+# 忽略dist-info文件夹
+*.dist-info/
+
+# 忽略__pycache__文件夹
+__pycache__/
+
+# 忽略Python字节码文件
+*.pyc
+*.pyo
+*.pyd
+
+# 忽略日志文件
+*.log
+
+# 忽略临时文件
+*.tmp
+*.temp
