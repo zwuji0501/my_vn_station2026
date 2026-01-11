@@ -78,8 +78,9 @@ class BacktesterManager(QtWidgets.QWidget):
         self.symbol_completer = QtWidgets.QCompleter()
         self.symbol_line.setCompleter(self.symbol_completer)
 
-        # Update completion when data source changes
+        # Update completion when data source or interval changes
         self.data_source_combo.currentIndexChanged.connect(self.update_symbol_completion)
+        self.interval_combo.currentIndexChanged.connect(self.update_symbol_completion)
 
         # Initial update
         self.update_symbol_completion()
@@ -89,8 +90,9 @@ class BacktesterManager(QtWidgets.QWidget):
         data_source = self.data_source_combo.currentData()
 
         if data_source == "csv":
-            # Get symbols from CSV files
-            symbols = self.get_csv_symbols()
+            # Get symbols from CSV files filtered by current interval
+            current_interval = self.interval_combo.currentText()
+            symbols = self.get_csv_symbols_for_interval(current_interval)
         else:
             # For database mode, use some common symbols or empty list
             symbols = self.get_common_symbols()
@@ -112,21 +114,63 @@ class BacktesterManager(QtWidgets.QWidget):
             # Load contract attributes to get exchange information
             contract_attributes = self._load_contract_attributes_for_completion()
 
-            # Scan for CSV files
+            # Scan for CSV files with new naming format: symbol_exchange_interval.csv
             for filename in os.listdir(csv_path):
-                if filename.endswith('_vnpy_import.csv'):
-                    # Extract symbol from filename (remove '_vnpy_import.csv' suffix)
-                    symbol = filename[:-16]  # len('_vnpy_import.csv') = 16
-                    if symbol:
-                        # Try to get exchange from contract attributes
-                        full_symbol = self._get_full_symbol_with_exchange(symbol, contract_attributes)
-                        symbols.append(full_symbol)
+                if filename.endswith('.csv') and not filename.startswith('contract_attribute'):
+                    # Parse new filename format: symbol_exchange_interval.csv
+                    parts = filename[:-4].split('_')  # Remove .csv and split by _
+                    if len(parts) >= 3:
+                        symbol = parts[0]
+                        exchange = parts[1]
+                        interval_suffix = parts[2]
+
+                        # Construct full vt_symbol
+                        full_symbol = f"{symbol}.{exchange}"
+                        if full_symbol not in symbols:
+                            symbols.append(full_symbol)
 
             # Sort symbols for better UX
             symbols.sort()
 
         except Exception as e:
             print(f"Error scanning CSV files: {e}")
+
+        return symbols
+
+    def get_csv_symbols_for_interval(self, interval: str) -> list:
+        """Get symbol list from CSV files for specific interval."""
+        symbols = []
+        csv_path = self.csv_path_line.text()
+
+        if not csv_path or not os.path.exists(csv_path):
+            return symbols
+
+        try:
+            # Load contract attributes to get exchange information
+            contract_attributes = self._load_contract_attributes_for_completion()
+
+            # Scan for CSV files with specific interval
+            for filename in os.listdir(csv_path):
+                if filename.endswith('.csv') and not filename.startswith('contract_attribute'):
+                    # Parse new filename format: symbol_exchange_interval.csv
+                    parts = filename[:-4].split('_')  # Remove .csv and split by _
+                    if len(parts) >= 3:
+                        symbol = parts[0]
+                        exchange = parts[1]
+                        file_interval = parts[2]
+
+                        # Check if this file matches the requested interval
+                        if file_interval == interval:
+                            # Construct full vt_symbol
+                            full_symbol = f"{symbol}.{exchange}"
+                            if full_symbol not in symbols:
+                                symbols.append(full_symbol)
+
+            # Sort symbols for better UX
+            symbols.sort()
+
+        except Exception as e:
+            print(f"Error scanning CSV files for interval {interval}: {e}")
 
         return symbols
 
@@ -217,8 +261,10 @@ class BacktesterManager(QtWidgets.QWidget):
         self.csv_path_button.setEnabled(False)
 
         self.interval_combo: QtWidgets.QComboBox = QtWidgets.QComboBox()
-        for interval in Interval:
-            self.interval_combo.addItem(interval.value)
+        # Add supported intervals including custom ones for CSV files
+        supported_intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "d"]
+        for interval in supported_intervals:
+            self.interval_combo.addItem(interval)
 
         end_dt: datetime = datetime.now()
         start_dt: datetime = end_dt - timedelta(days=3 * 365)
@@ -925,6 +971,20 @@ class BacktesterManager(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(
                 self, _("成功"), _("CSV数据缓存已清除")
             )
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        """
+        Handle UI close event - automatically clear CSV cache when closing.
+        """
+        try:
+            # Clear CSV cache automatically when closing the UI
+            self.backtester_engine.clear_csv_cache()
+            self.write_log(_("UI关闭时自动清除CSV数据缓存"))
+        except Exception as e:
+            self.write_log(_("清除缓存时出错: {}").format(str(e)))
+
+        # Accept the close event
+        event.accept()
 
     def show_cache_info(self) -> None:
         """

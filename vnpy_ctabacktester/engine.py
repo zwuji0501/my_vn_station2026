@@ -72,6 +72,17 @@ class BacktesterEngine(BaseEngine):
         # CSV data cache
         self.csv_data_cache: dict = {}  # Cache for loaded CSV data
 
+        # CSV interval mapping: UI interval -> CSV filename suffix
+        self.csv_interval_mapping = {
+            "1m": "1m",
+            "5m": "5m",
+            "15m": "15m",
+            "30m": "30m",
+            "1h": "1h",
+            "4h": "4h",
+            "d": "d"
+        }
+
         # Optimization control
         self.optimization_running: bool = False
 
@@ -186,12 +197,23 @@ class BacktesterEngine(BaseEngine):
 
         if interval == Interval.TICK.value:
             mode: BacktestingMode = BacktestingMode.TICK
+            vnpy_interval = interval
         else:
             mode = BacktestingMode.BAR
+            # Map UI interval to vn.py Interval enum
+            if interval in ["1m", "5m", "15m", "30m"]:
+                vnpy_interval = Interval.MINUTE.value
+            elif interval in ["1h", "4h"]:
+                vnpy_interval = Interval.HOUR.value
+            elif interval == "d":
+                vnpy_interval = Interval.DAILY.value
+            else:
+                # Fallback to MINUTE for unknown intervals
+                vnpy_interval = Interval.MINUTE.value
 
         engine.set_parameters(
             vt_symbol=vt_symbol,
-            interval=interval,
+            interval=vnpy_interval,
             start=start,
             end=end,
             rate=rate,
@@ -278,8 +300,19 @@ class BacktesterEngine(BaseEngine):
                 self.write_log(_("成功加载 {} 条缓存数据记录").format(len(engine.history_data)))
                 return True
 
-            # Construct CSV filename
-            csv_filename = f"{symbol}_vnpy_import.csv"
+            # Construct CSV filename with new format: symbol_exchange_interval.csv
+            # Extract exchange from vt_symbol (format: symbol.exchange)
+            exchange = ""
+            if '.' in vt_symbol:
+                parts = vt_symbol.split('.')
+                if len(parts) >= 2:
+                    exchange = parts[1]
+
+            # Get CSV interval suffix from mapping
+            csv_interval = self.csv_interval_mapping.get(interval, interval)
+
+            # Construct filename: symbol_exchange_interval.csv
+            csv_filename = f"{symbol}_{exchange}_{csv_interval}.csv"
             csv_filepath = os.path.join(self.csv_path, csv_filename)
 
             if not os.path.exists(csv_filepath):
@@ -344,17 +377,16 @@ class BacktesterEngine(BaseEngine):
                         # Get exchange enum from contract attributes or fallback
                         exchange = self._get_exchange_from_contract_attributes(vt_symbol, contract_attributes)
 
-                        # Get interval enum
-                        interval_upper = interval.upper()
-                        if interval_upper == "MINUTE":
+                        # Get interval enum - map UI intervals to vn.py Interval enums
+                        if interval in ["1m", "5m", "15m", "30m"]:
                             interval_enum = Interval.MINUTE
-                        elif interval_upper == "HOUR":
+                        elif interval in ["1h", "4h"]:
                             interval_enum = Interval.HOUR
-                        elif interval_upper == "DAILY":
+                        elif interval == "d":
                             interval_enum = Interval.DAILY
-                        elif interval_upper == "WEEKLY":
+                        elif interval == "w":
                             interval_enum = Interval.WEEKLY
-                        elif interval_upper == "TICK":
+                        elif interval == "tick":
                             interval_enum = Interval.TICK
                         else:
                             interval_enum = Interval.MINUTE  # Default to MINUTE
@@ -589,12 +621,23 @@ class BacktesterEngine(BaseEngine):
 
         if interval == Interval.TICK.value:
             mode: BacktestingMode = BacktestingMode.TICK
+            vnpy_interval = interval
         else:
             mode = BacktestingMode.BAR
+            # Map UI interval to vn.py Interval enum
+            if interval in ["1m", "5m", "15m", "30m"]:
+                vnpy_interval = Interval.MINUTE.value
+            elif interval in ["1h", "4h"]:
+                vnpy_interval = Interval.HOUR.value
+            elif interval == "d":
+                vnpy_interval = Interval.DAILY.value
+            else:
+                # Fallback to MINUTE for unknown intervals
+                vnpy_interval = Interval.MINUTE.value
 
         engine.set_parameters(
             vt_symbol=vt_symbol,
-            interval=interval,
+            interval=vnpy_interval,
             start=start,
             end=end,
             rate=rate,

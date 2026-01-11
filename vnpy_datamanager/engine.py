@@ -1471,8 +1471,10 @@ class ManagerEngine(BaseEngine):
 
             def on_daily_bar(bar: BarData) -> None:
                 """日线BarGenerator回调函数"""
+                # 将日线时间设置为15:00:00（按照用户要求）
+                daily_datetime = bar.datetime.replace(hour=15, minute=0, second=0, microsecond=0)
                 bar_dict = {
-                    'datetime': bar.datetime,
+                    'datetime': daily_datetime,
                     'open': bar.open_price,
                     'high': bar.high_price,
                     'low': bar.low_price,
