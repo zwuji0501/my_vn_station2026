@@ -54,6 +54,9 @@ class ManagerWidget(QtWidgets.QWidget):
         batch_import_button: QtWidgets.QPushButton = QtWidgets.QPushButton("批量导入")
         batch_import_button.clicked.connect(self.batch_import_data)
 
+        batch_process_button: QtWidgets.QPushButton = QtWidgets.QPushButton("批量处理csv")
+        batch_process_button.clicked.connect(self.batch_process_csv_data)
+
         hbox1: QtWidgets.QHBoxLayout = QtWidgets.QHBoxLayout()
         hbox1.addWidget(refresh_button)
         hbox1.addStretch()
@@ -62,6 +65,7 @@ class ManagerWidget(QtWidgets.QWidget):
         hbox1.addWidget(download_button)
         hbox1.addWidget(convert_tdx_button)
         hbox1.addWidget(batch_import_button)
+        hbox1.addWidget(batch_process_button)
 
         hbox2: QtWidgets.QHBoxLayout = QtWidgets.QHBoxLayout()
         hbox2.addWidget(self.tree)
@@ -584,6 +588,94 @@ class ManagerWidget(QtWidgets.QWidget):
                 self,
                 "批量导入失败",
                 f"批量导入过程中出现错误：{str(e)}"
+            )
+
+    def batch_process_csv_data(self) -> None:
+        """批量处理CSV数据：转换 + 生成多周期CSV（不导入数据库）"""
+        try:
+            # 显示总进度对话框
+            progress = QtWidgets.QProgressDialog("正在批量处理CSV数据...", "取消", 0, 100, self)
+            progress.setWindowTitle("批量处理进度")
+            progress.setWindowModality(QtCore.Qt.WindowModal)
+            progress.setValue(0)
+            progress.show()
+
+            total_stats = {
+                "converted_files": 0,
+                "processed_contracts": 0,
+                "generated_files": 0
+            }
+
+            # 步骤1：转换TDX数据
+            progress.setLabelText("步骤1/3：转换TDX数据...")
+            progress.setValue(10)
+
+            # 设置默认路径
+            source_dir = 'C:\\new_tdxqh\\vipdoc\\ds\\minline\\'
+            target_dir = 'C:\\new_tdxqh\\vipdoc\\ds\\minline\\csv\\'
+
+            # 调用转换函数
+            from ..translate_tdx_kline_data import conver_all_with_vnpy_format
+            converted_count = conver_all_with_vnpy_format(
+                source_dir=source_dir,
+                target_dir=target_dir,
+                convert_to_vnpy=True,
+                log_callback=self._log_callback
+            )
+            total_stats["converted_files"] = converted_count
+
+            progress.setValue(40)
+
+            # 步骤2：生成多周期CSV文件
+            progress.setLabelText("步骤2/3：生成多周期CSV...")
+            progress.setValue(50)
+
+            # 调用批量处理CSV方法
+            result = self.engine.batch_process_csv_data(
+                source_dir=source_dir,
+                target_dir=target_dir
+            )
+
+            # 合并统计信息
+            total_stats["processed_contracts"] = result.get("processed_contracts", 0)
+            total_stats["generated_files"] = result.get("generated_files", 0)
+
+            progress.setValue(90)
+
+            # 步骤3：清理中间文件
+            progress.setLabelText("步骤3/3：清理中间文件...")
+            progress.setValue(95)
+
+            cleanup_count = self.engine.cleanup_intermediate_files(target_dir)
+            total_stats["cleanup_files"] = cleanup_count
+
+            progress.setValue(100)
+            progress.close()
+
+            # 显示结果
+            QtWidgets.QMessageBox.information(
+                self,
+                "批量处理完成",
+                f"批量处理完成！\n\n"
+                f"转换文件: {total_stats['converted_files']} 个\n"
+                f"处理合约: {total_stats['processed_contracts']} 个\n"
+                f"生成文件: {total_stats['generated_files']} 个\n"
+                f"清理文件: {total_stats['cleanup_files']} 个\n\n"
+                f"源目录: {source_dir}\n"
+                f"目标目录: {target_dir}"
+            )
+
+        except Exception as e:
+            # 关闭进度对话框（如果存在）
+            try:
+                progress.close()
+            except:
+                pass
+
+            QtWidgets.QMessageBox.critical(
+                self,
+                "批量处理失败",
+                f"批量处理过程中出现错误：{str(e)}"
             )
 
 
