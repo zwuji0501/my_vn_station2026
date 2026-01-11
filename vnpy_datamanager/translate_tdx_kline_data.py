@@ -24,6 +24,9 @@ def _log_message(msg: str, log_callback=None) -> None:
 # linename=['code','date','open','high','low','close','amout','vol']
 # df_all_stock = pd.DataFrame(stock_list, columns=linename)
 def miniute2csv_data(dirname, fname, targetDir, log_callback=None):
+    # 确保目录路径以反斜杠结尾，避免路径拼接错误
+    if not dirname.endswith('\\') and not dirname.endswith('/'):
+        dirname += '\\'
     ofile=open(dirname + fname, 'rb')
     buf=ofile.read()
     ofile.close()

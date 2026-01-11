@@ -1,3 +1,4 @@
+import os
 from functools import partial
 from datetime import datetime, timedelta
 
@@ -591,7 +592,36 @@ class ManagerWidget(QtWidgets.QWidget):
             )
 
     def batch_process_csv_data(self) -> None:
-        """批量处理CSV数据：转换 + 生成多周期CSV（不导入数据库）"""
+        """批量处理CSV数据：提供两种处理方式的选择"""
+        # 提供两种处理方式的选择
+        msg_box = QtWidgets.QMessageBox()
+        msg_box.setWindowTitle("选择处理方式")
+        msg_box.setText("请选择CSV批量处理方式：")
+        msg_box.setStandardButtons(QtWidgets.QMessageBox.Cancel)
+
+        # 添加自定义按钮
+        ui_button = msg_box.addButton("UI界面处理", QtWidgets.QMessageBox.ActionRole)
+        standalone_button = msg_box.addButton("独立进程处理", QtWidgets.QMessageBox.ActionRole)
+
+        msg_box.setDefaultButton(ui_button)
+        msg_box.setInformativeText(
+            "UI界面处理：在当前界面中处理，显示进度和结果\n"
+            "独立进程处理：启动单独的Python进程处理，不阻塞界面"
+        )
+
+        reply = msg_box.exec_()
+
+        if reply == QtWidgets.QMessageBox.Cancel:
+            return
+
+        # 根据选择调用不同的处理方法
+        if msg_box.clickedButton() == ui_button:
+            self._batch_process_csv_ui()
+        elif msg_box.clickedButton() == standalone_button:
+            self.batch_process_csv_standalone()
+
+    def _batch_process_csv_ui(self) -> None:
+        """在UI界面中批量处理CSV数据：转换 + 生成多周期CSV（不导入数据库）"""
         try:
             # 显示总进度对话框
             progress = QtWidgets.QProgressDialog("正在批量处理CSV数据...", "取消", 0, 100, self)
@@ -676,6 +706,116 @@ class ManagerWidget(QtWidgets.QWidget):
                 self,
                 "批量处理失败",
                 f"批量处理过程中出现错误：{str(e)}"
+            )
+
+    def write_log(self, msg: str) -> None:
+        """记录日志"""
+        print(f"[UI] {msg}")
+
+    def batch_process_csv_standalone(self) -> None:
+        """使用独立进程进行批量处理CSV数据"""
+        try:
+            # 确认操作
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "确认独立进程处理",
+                "即将使用独立进程进行批量处理CSV数据。\n\n"
+                "这将启动一个单独的Python进程来处理数据，\n"
+                "处理期间不会阻塞当前界面。\n\n"
+                "是否继续？",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No
+            )
+
+            if reply == QtWidgets.QMessageBox.No:
+                return
+
+            # 设置路径
+            source_dir = r'C:\new_tdxqh\vipdoc\ds\minline'
+            target_dir = r'C:\new_tdxqh\vipdoc\ds\minline\csv'
+            script_path = r'C:\veighna_studio\Lib\site-packages\vnpy_ctabacktester\scripts\batch_process_csv_standalone.py'
+
+            # 检查脚本文件是否存在
+            if not os.path.exists(script_path):
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "脚本文件不存在",
+                    f"找不到独立处理脚本：\n{script_path}"
+                )
+                return
+
+            # 启动独立进程
+            import subprocess
+            import sys
+
+            try:
+                # 使用subprocess启动独立进程
+                self.write_log(f"启动独立进程: {sys.executable} {script_path}")
+
+                process = subprocess.Popen([
+                    sys.executable,
+                    script_path
+                ],
+                cwd=os.path.dirname(script_path),  # 设置工作目录
+                creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0  # Windows下创建新控制台
+                )
+
+                # 短暂等待检查进程是否成功启动
+                import time
+                time.sleep(0.5)
+
+                if process.poll() is None:
+                    # 进程仍在运行
+                    self.write_log(f"独立进程已启动，PID: {process.pid}")
+
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        "独立进程已启动",
+                        f"批量处理CSV数据的独立进程已启动。\n\n"
+                        f"进程ID: {process.pid}\n\n"
+                        f"处理结果将显示在新打开的控制台窗口中。\n"
+                        f"请查看该窗口中的处理进度和结果。\n\n"
+                        f"处理完成后，窗口会显示'按任意键继续...'提示。"
+                    )
+                else:
+                    # 进程已经退出，读取错误信息
+                    stdout, stderr = process.communicate()
+                    error_msg = stderr.strip() if stderr else "未知错误"
+
+                    self.write_log(f"独立进程启动失败: {error_msg}")
+
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "独立进程启动失败",
+                        f"独立进程启动失败：\n\n{error_msg}\n\n"
+                        f"请检查Python环境和脚本文件。"
+                    )
+
+            except FileNotFoundError as e:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "文件未找到",
+                    f"找不到Python解释器或脚本文件：\n{str(e)}"
+                )
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "启动失败",
+                    f"启动独立进程时出现错误：\n{str(e)}"
+                )
+
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "启动失败",
+                    f"启动独立进程失败：{str(e)}"
+                )
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "独立进程处理失败",
+                f"独立进程处理过程中出现错误：{str(e)}"
             )
 
 
