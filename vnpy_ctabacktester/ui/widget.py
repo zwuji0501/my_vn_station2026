@@ -82,6 +82,9 @@ class BacktesterManager(QtWidgets.QWidget):
         self.data_source_combo.currentIndexChanged.connect(self.update_symbol_completion)
         self.interval_combo.currentIndexChanged.connect(self.update_symbol_completion)
 
+        # Update contract attributes when symbol changes
+        self.symbol_line.editingFinished.connect(self.update_contract_attributes)
+
         # Initial update
         self.update_symbol_completion()
 
@@ -173,6 +176,50 @@ class BacktesterManager(QtWidgets.QWidget):
             print(f"Error scanning CSV files for interval {interval}: {e}")
 
         return symbols
+
+    def update_contract_attributes(self) -> None:
+        """Update contract attributes (size, price tick, slippage) based on selected symbol."""
+        vt_symbol = self.symbol_line.text().strip()
+        if not vt_symbol:
+            return
+
+        try:
+            # Load contract attributes from JSON file
+            contract_attributes = self._load_contract_attributes_for_completion()
+
+            # Extract symbol code (remove exchange suffix and numbers)
+            # For example: "rb8888.SHFE" -> "rb", "IF8888.CFFEX" -> "IF"
+            symbol_code = ""
+            if '.' in vt_symbol:
+                base_symbol = vt_symbol.split('.')[0]
+                # Special handling for certain futures
+                if base_symbol.startswith(('IF', 'IH', 'IC', 'IM')):
+                    symbol_code = base_symbol[:2]  # Index futures: IF, IH, IC, IM
+                elif base_symbol.startswith(('T', 'TF', 'TL', 'TS')):
+                    symbol_code = base_symbol[:1]  # Treasury futures: T, TF, TL, TS
+                elif len(base_symbol) >= 2:
+                    symbol_code = base_symbol[:2].lower()  # Most commodities
+                else:
+                    symbol_code = base_symbol.lower()
+
+            # Look up contract attributes
+            if symbol_code in contract_attributes:
+                contract_info = contract_attributes[symbol_code]
+                size = contract_info.get('size', 1)
+                price_tick = contract_info.get('priceTick', 0.01)
+
+                # Update UI fields
+                self.size_line.setText(str(size))
+                self.pricetick_line.setText(str(price_tick))
+                self.slippage_line.setText(str(price_tick))  # Default slippage to 1 price tick
+
+                self.write_log(_("更新合约属性: {} - 乘数:{}, 跳动:{}, 滑点:{}").format(
+                    vt_symbol, size, price_tick, price_tick))
+            else:
+                self.write_log(_("未找到合约属性: {} (尝试查找: {})").format(vt_symbol, symbol_code))
+
+        except Exception as e:
+            self.write_log(_("更新合约属性失败: {}").format(str(e)))
 
     def _load_contract_attributes_for_completion(self):
         """Load contract attributes for auto-completion."""
