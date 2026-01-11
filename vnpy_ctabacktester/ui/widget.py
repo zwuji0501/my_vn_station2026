@@ -187,20 +187,23 @@ class BacktesterManager(QtWidgets.QWidget):
             # Load contract attributes from JSON file
             contract_attributes = self._load_contract_attributes_for_completion()
 
-            # Extract symbol code (remove exchange suffix and numbers)
-            # For example: "rb8888.SHFE" -> "rb", "IF8888.CFFEX" -> "IF"
+            # Extract symbol code (remove exchange suffix and keep only letters)
+            # For example: "rb8888.SHFE" -> "rb", "c8888.DCE" -> "c", "IF8888.CFFEX" -> "IF"
             symbol_code = ""
             if '.' in vt_symbol:
                 base_symbol = vt_symbol.split('.')[0]
-                # Special handling for certain futures
-                if base_symbol.startswith(('IF', 'IH', 'IC', 'IM')):
-                    symbol_code = base_symbol[:2]  # Index futures: IF, IH, IC, IM
-                elif base_symbol.startswith(('T', 'TF', 'TL', 'TS')):
-                    symbol_code = base_symbol[:1]  # Treasury futures: T, TF, TL, TS
-                elif len(base_symbol) >= 2:
-                    symbol_code = base_symbol[:2].lower()  # Most commodities
-                else:
-                    symbol_code = base_symbol.lower()
+
+                # Extract only alphabetic characters from the beginning
+                import re
+                match = re.match(r'^([a-zA-Z]+)', base_symbol)
+                if match:
+                    symbol_code = match.group(1).lower()
+
+                    # Special handling for certain futures that need specific casing
+                    if symbol_code in ['if', 'ih', 'ic', 'im']:
+                        symbol_code = symbol_code.upper()  # Index futures: IF, IH, IC, IM
+                    elif symbol_code in ['t', 'tf', 'tl', 'ts']:
+                        symbol_code = symbol_code.upper()  # Treasury futures: T, TF, TL, TS
 
             # Look up contract attributes
             if symbol_code in contract_attributes:
