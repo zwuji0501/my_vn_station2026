@@ -2,6 +2,7 @@ import importlib
 import traceback
 import csv
 import os
+import json
 from datetime import datetime
 from threading import Thread
 from pathlib import Path
@@ -63,6 +64,16 @@ class BacktesterEngine(BaseEngine):
         self.save_trades_separately: bool = False
         self.current_class_name: str = ""
         self.current_vt_symbol: str = ""
+
+        # Data source settings
+        self.data_source: str = "database"  # "database" or "csv"
+        self.csv_path: str = r"C:\new_tdxqh\vipdoc\ds\minline\csv"
+
+        # CSV data cache
+        self.csv_data_cache: dict = {}  # Cache for loaded CSV data
+
+        # Optimization control
+        self.optimization_running: bool = False
 
     def init_engine(self) -> None:
         """"""
@@ -197,11 +208,20 @@ class BacktesterEngine(BaseEngine):
             setting
         )
 
-        engine.load_data()
-        if not engine.history_data:
-            self.write_log(_("策略回测失败，历史数据为空"))
-            self.thread = None
-            return
+        # Load data based on data source selection
+        if self.data_source == "csv":
+            success = self.load_csv_data(engine, vt_symbol, interval, start, end)
+            if not success or not engine.history_data:
+                self.write_log(_("策略回测失败，CSV数据加载失败或数据为空"))
+                self.thread = None
+                return
+        else:
+            # Default database loading
+            engine.load_data()
+            if not engine.history_data:
+                self.write_log(_("策略回测失败，历史数据为空"))
+                self.thread = None
+                return
 
         try:
             engine.run_backtesting()
@@ -229,6 +249,264 @@ class BacktesterEngine(BaseEngine):
         self.save_trades_separately = False
         self.current_class_name = ""
         self.current_vt_symbol = ""
+
+    def load_csv_data(self, engine, vt_symbol: str, interval: str, start: datetime, end: datetime) -> bool:
+        """
+        Load data from CSV files for backtesting with caching support.
+
+        Args:
+            engine: BacktestingEngine instance
+            vt_symbol: Symbol like "rb8888.SHFE"
+            interval: Interval string
+            start: Start datetime
+            end: End datetime
+
+        Returns:
+            bool: True if data loaded successfully
+        """
+        try:
+            # Extract symbol from vt_symbol (remove exchange part)
+            symbol = vt_symbol.split('.')[0] if '.' in vt_symbol else vt_symbol
+
+            # Create cache key
+            cache_key = f"{symbol}_{interval}_{start.strftime('%Y%m%d_%H%M%S')}_{end.strftime('%Y%m%d_%H%M%S')}"
+
+            # Check if data is already cached
+            if cache_key in self.csv_data_cache:
+                self.write_log(_("从缓存加载数据: {} (缓存键: {})").format(symbol, cache_key))
+                engine.history_data = self.csv_data_cache[cache_key]
+                self.write_log(_("成功加载 {} 条缓存数据记录").format(len(engine.history_data)))
+                return True
+
+            # Construct CSV filename
+            csv_filename = f"{symbol}_vnpy_import.csv"
+            csv_filepath = os.path.join(self.csv_path, csv_filename)
+
+            if not os.path.exists(csv_filepath):
+                self.write_log(_("CSV文件不存在: {}").format(csv_filepath))
+                return False
+
+            self.write_log(_("从CSV文件加载数据: {}").format(csv_filepath))
+
+            # Load data from CSV
+            history_data = self._load_history_from_csv(csv_filepath, vt_symbol, interval, start, end)
+
+            if not history_data:
+                self.write_log(_("CSV文件中没有找到有效数据"))
+                return False
+
+            # Cache the loaded data
+            self.csv_data_cache[cache_key] = history_data
+            self.write_log(_("数据已缓存 (缓存键: {})").format(cache_key))
+
+            # Set the loaded data to the engine
+            engine.history_data = history_data
+            self.write_log(_("成功加载 {} 条数据记录").format(len(history_data)))
+
+            return True
+
+        except Exception as e:
+            self.write_log(_("CSV数据加载失败: {}").format(str(e)))
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _load_history_from_csv(self, csv_filepath: str, vt_symbol: str, interval: str, start: datetime, end: datetime):
+        """
+        Load history data from CSV file.
+
+        Expected CSV format:
+        datetime,open,high,low,close,volume,turnover,open_interest
+        """
+        from vnpy.trader.object import BarData
+        from vnpy.trader.constant import Interval, Exchange
+        import json
+
+        history_data = []
+
+        try:
+            with open(csv_filepath, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+
+                # Load contract attribute mapping from JSON file
+                contract_attributes = self._load_contract_attributes()
+
+                for row in reader:
+                    try:
+                        # Parse datetime
+                        dt_str = row['datetime']
+                        dt = datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S')
+
+                        # Filter by date range
+                        if dt < start or dt > end:
+                            continue
+
+                        # Get exchange enum from contract attributes or fallback
+                        exchange = self._get_exchange_from_contract_attributes(vt_symbol, contract_attributes)
+
+                        # Get interval enum
+                        interval_upper = interval.upper()
+                        if interval_upper == "MINUTE":
+                            interval_enum = Interval.MINUTE
+                        elif interval_upper == "HOUR":
+                            interval_enum = Interval.HOUR
+                        elif interval_upper == "DAILY":
+                            interval_enum = Interval.DAILY
+                        elif interval_upper == "WEEKLY":
+                            interval_enum = Interval.WEEKLY
+                        elif interval_upper == "TICK":
+                            interval_enum = Interval.TICK
+                        else:
+                            interval_enum = Interval.MINUTE  # Default to MINUTE
+
+                        # Create BarData object
+                        bar = BarData(
+                            symbol=vt_symbol.split('.')[0],
+                            exchange=exchange,
+                            datetime=dt,
+                            interval=interval_enum,
+                            volume=float(row['volume']),
+                            turnover=float(row.get('turnover', 0)),
+                            open_interest=float(row.get('open_interest', 0)),
+                            open_price=float(row['open']),
+                            high_price=float(row['high']),
+                            low_price=float(row['low']),
+                            close_price=float(row['close']),
+                            gateway_name="CSV"
+                        )
+
+                        history_data.append(bar)
+
+                    except (ValueError, KeyError) as e:
+                        # Skip invalid rows but continue processing
+                        continue
+
+            # Sort by datetime
+            history_data.sort(key=lambda x: x.datetime)
+
+            return history_data
+
+        except Exception as e:
+            self.write_log(_("CSV文件解析失败: {}").format(str(e)))
+            return []
+
+    def _load_contract_attributes(self):
+        """
+        Load contract attributes from JSON file.
+        """
+        contract_json_path = os.path.join(self.csv_path, "contract_attribute.json")
+
+        try:
+            with open(contract_json_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            self.write_log(f"无法加载合约属性文件 {contract_json_path}: {e}")
+            return {}
+
+    def _get_exchange_from_contract_attributes(self, vt_symbol: str, contract_attributes: dict):
+        """
+        Get exchange enum from contract attributes.
+
+        Args:
+            vt_symbol: Symbol like "rb8888.SHFE"
+            contract_attributes: Contract attributes dictionary from JSON
+
+        Returns:
+            Exchange enum
+        """
+        from vnpy.trader.constant import Exchange
+
+        # Extract symbol (remove exchange part if present)
+        symbol = vt_symbol.split('.')[0] if '.' in vt_symbol else vt_symbol
+
+        # Try to find contract in attributes
+        if symbol in contract_attributes:
+            contract_info = contract_attributes[symbol]
+            exchange_str = contract_info.get('exchange')
+
+            if exchange_str:
+                try:
+                    return Exchange[exchange_str]
+                except KeyError:
+                    self.write_log(f"未知交易所代码: {exchange_str}，使用默认交易所SHFE")
+                    return Exchange.SHFE
+
+        # Fallback: try to extract from vt_symbol
+        if '.' in vt_symbol:
+            exchange_str = vt_symbol.split('.')[1]
+            try:
+                return Exchange[exchange_str]
+            except KeyError:
+                self.write_log(f"无法识别交易所: {vt_symbol}，使用默认交易所SHFE")
+                return Exchange.SHFE
+        else:
+            # If no exchange in vt_symbol and not found in attributes, use SHFE as default
+            self.write_log(f"合约 {symbol} 未找到交易所信息，使用默认交易所SHFE")
+            return Exchange.SHFE
+
+    def clear_csv_cache(self):
+        """
+        Clear the CSV data cache.
+        This can be useful if CSV files have been updated and you want to reload them.
+        """
+        cache_size = len(self.csv_data_cache)
+        self.csv_data_cache.clear()
+        self.write_log(_("已清除CSV数据缓存，共 {} 条记录").format(cache_size))
+
+    def get_csv_cache_info(self):
+        """
+        Get information about the current CSV cache.
+
+        Returns:
+            dict: Cache statistics
+        """
+        total_records = sum(len(data) for data in self.csv_data_cache.values())
+        return {
+            "cached_keys": len(self.csv_data_cache),
+            "total_records": total_records,
+            "cache_keys": list(self.csv_data_cache.keys())
+        }
+
+    def stop_optimization(self) -> bool:
+        """
+        Force stop the current optimization task.
+
+        Returns:
+            bool: True if successfully stopped, False otherwise
+        """
+        if not self.thread or not self.optimization_running:
+            self.write_log(_("当前没有正在运行的优化任务"))
+            return False
+
+        try:
+            # Try to terminate the thread
+            if self.thread.is_alive():
+                # Note: Thread termination is not clean in Python
+                # We just set the flag and let the thread finish gracefully
+                self.optimization_running = False
+                self.write_log(_("正在停止优化任务..."))
+
+                # Wait a short time for graceful shutdown
+                self.thread.join(timeout=2.0)
+
+                if self.thread.is_alive():
+                    self.write_log(_("优化任务未能正常停止，可能仍在后台运行"))
+                else:
+                    self.write_log(_("优化任务已停止"))
+            else:
+                self.write_log(_("优化任务已完成"))
+
+            # Clean up thread reference
+            self.thread = None
+
+            # Reset optimization state
+            self.result_values = None
+
+            return True
+
+        except Exception as e:
+            self.write_log(_("停止优化任务时出错: {}").format(str(e)))
+            return False
 
     def start_backtesting(
         self,
@@ -336,7 +614,15 @@ class BacktesterEngine(BaseEngine):
         # 预加载数据，避免在优化过程中重复加载
         self.write_log(_("预加载历史数据..."))
         try:
-            engine.load_data()
+            # Load data based on data source selection
+            if self.data_source == "csv":
+                success = self.load_csv_data(engine, vt_symbol, interval, start, end)
+                if not success or not engine.history_data:
+                    self.write_log(_("策略参数优化失败，CSV数据加载失败或数据为空"))
+                    return
+            else:
+                # Default database loading
+                engine.load_data()
             if not engine.history_data:
                 self.write_log(_("策略回测失败，历史数据为空"))
                 self.thread = None
@@ -344,6 +630,7 @@ class BacktesterEngine(BaseEngine):
         except Exception as e:
             self.write_log(_("数据加载失败: {}").format(str(e)))
             self.thread = None
+            self.optimization_running = False
             return
 
         # 0则代表不限制，但限制最大进程数避免死机
@@ -388,6 +675,7 @@ class BacktesterEngine(BaseEngine):
 
         # Clear thread object handler.
         self.thread = None
+        self.optimization_running = False
         self.write_log(_("多进程参数优化完成"))
 
         # Put optimization done event
@@ -415,6 +703,7 @@ class BacktesterEngine(BaseEngine):
             return False
 
         self.write_log("-" * 40)
+        self.optimization_running = True
         self.thread = Thread(
             target=self.run_optimization,
             args=(

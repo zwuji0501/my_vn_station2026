@@ -1,6 +1,7 @@
 import platform
 import csv
 import os
+import json
 import shutil
 import subprocess
 from datetime import datetime, timedelta
@@ -65,8 +66,122 @@ class BacktesterManager(QtWidgets.QWidget):
         self.register_event()
         self.backtester_engine.init_engine()
         self.init_strategy_settings()
+
+        # Initialize symbol auto-completion before loading auto settings
+        self.init_symbol_completion()
+
         # Load auto setting after strategy settings are initialized
         self.load_auto_setting()
+
+    def init_symbol_completion(self) -> None:
+        """Initialize auto-completion for symbol input."""
+        self.symbol_completer = QtWidgets.QCompleter()
+        self.symbol_line.setCompleter(self.symbol_completer)
+
+        # Update completion when data source changes
+        self.data_source_combo.currentIndexChanged.connect(self.update_symbol_completion)
+
+        # Initial update
+        self.update_symbol_completion()
+
+    def update_symbol_completion(self) -> None:
+        """Update symbol completion list based on current data source."""
+        data_source = self.data_source_combo.currentData()
+
+        if data_source == "csv":
+            # Get symbols from CSV files
+            symbols = self.get_csv_symbols()
+        else:
+            # For database mode, use some common symbols or empty list
+            symbols = self.get_common_symbols()
+
+        # Create completer model
+        model = QtCore.QStringListModel(symbols)
+        self.symbol_completer.setModel(model)
+        self.symbol_completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+
+    def get_csv_symbols(self) -> list:
+        """Get symbol list from CSV files in the CSV directory with exchange suffixes."""
+        symbols = []
+        csv_path = self.csv_path_line.text()
+
+        if not csv_path or not os.path.exists(csv_path):
+            return symbols
+
+        try:
+            # Load contract attributes to get exchange information
+            contract_attributes = self._load_contract_attributes_for_completion()
+
+            # Scan for CSV files
+            for filename in os.listdir(csv_path):
+                if filename.endswith('_vnpy_import.csv'):
+                    # Extract symbol from filename (remove '_vnpy_import.csv' suffix)
+                    symbol = filename[:-16]  # len('_vnpy_import.csv') = 16
+                    if symbol:
+                        # Try to get exchange from contract attributes
+                        full_symbol = self._get_full_symbol_with_exchange(symbol, contract_attributes)
+                        symbols.append(full_symbol)
+
+            # Sort symbols for better UX
+            symbols.sort()
+
+        except Exception as e:
+            print(f"Error scanning CSV files: {e}")
+
+        return symbols
+
+    def _load_contract_attributes_for_completion(self):
+        """Load contract attributes for auto-completion."""
+        contract_json_path = os.path.join(self.csv_path_line.text(), "contract_attribute.json")
+
+        try:
+            with open(contract_json_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _get_full_symbol_with_exchange(self, symbol: str, contract_attributes: dict) -> str:
+        """Get full symbol with exchange suffix."""
+        if symbol in contract_attributes:
+            contract_info = contract_attributes[symbol]
+            exchange = contract_info.get('exchange')
+            if exchange:
+                return f"{symbol}.{exchange}"
+
+        # Fallback: try to guess exchange based on common patterns
+        return self._guess_exchange_for_symbol(symbol)
+
+    def _guess_exchange_for_symbol(self, symbol: str) -> str:
+        """Guess exchange for symbol based on common patterns."""
+        # Common exchange patterns for Chinese futures
+        if symbol.startswith(('IF', 'IH', 'IC', 'IM', 'T', 'TF', 'TL', 'TS')):
+            return f"{symbol}.CFFEX"  # China Financial Futures Exchange
+        elif symbol.startswith(('cu', 'al', 'zn', 'pb', 'ni', 'sn', 'au', 'ag')):
+            return f"{symbol}.SHFE"   # Shanghai Futures Exchange
+        elif symbol.startswith(('rb', 'hc', 'sp', 'wr', 'fu', 'bu', 'ao')):
+            return f"{symbol}.SHFE"   # Shanghai Futures Exchange
+        elif symbol.startswith(('c', 'cs', 'a', 'b', 'm', 'y', 'p', 'fb', 'bb', 'jd', 'lh', 'v', 'pp', 'l', 'i', 'j', 'jm')):
+            return f"{symbol}.DCE"    # Dalian Commodity Exchange
+        elif symbol.startswith(('SR', 'OI', 'RM', 'TA', 'FG', 'MA', 'CF', 'CY', 'PF', 'PK', 'PR', 'PX', 'SH', 'SF', 'SM', 'RS', 'OI', 'UR', 'SA', 'CJ', 'AP')):
+            return f"{symbol}.CZCE"   # Zhengzhou Commodity Exchange
+        elif symbol.startswith(('pt', 'pd', 'lc', 'ps', 'si')):
+            return f"{symbol}.GFEX"   # Guangzhou Futures Exchange
+        elif symbol.startswith(('sc', 'nr', 'lu', 'ec', 'bc')):
+            return f"{symbol}.INE"    # Shanghai International Energy Exchange
+        else:
+            # Default fallback
+            return f"{symbol}.SHFE"
+
+    def get_common_symbols(self) -> list:
+        """Get common symbol list for database mode."""
+        # Return some common futures symbols
+        return [
+            "IF8888.CFFEX", "IH8888.CFFEX", "IC8888.CFFEX",
+            "rb8888.SHFE", "hc8888.SHFE", "i8888.DCE",
+            "j8888.DCE", "jm8888.DCE", "p8888.DCE",
+            "y8888.DCE", "m8888.DCE", "a8888.DCE",
+            "c8888.DCE", "cs8888.DCE", "jd8888.DCE"
+        ]
 
     def init_strategy_settings(self) -> None:
         """"""
@@ -87,6 +202,19 @@ class BacktesterManager(QtWidgets.QWidget):
         self.class_combo: QtWidgets.QComboBox = QtWidgets.QComboBox()
 
         self.symbol_line: QtWidgets.QLineEdit = QtWidgets.QLineEdit("IF88.CFFEX")
+
+        # Data source selection
+        self.data_source_combo: QtWidgets.QComboBox = QtWidgets.QComboBox()
+        self.data_source_combo.addItem(_("数据库"), "database")
+        self.data_source_combo.addItem(_("本地CSV"), "csv")
+        self.data_source_combo.currentIndexChanged.connect(self.on_data_source_changed)
+
+        # CSV file path selection
+        self.csv_path_line: QtWidgets.QLineEdit = QtWidgets.QLineEdit(r"C:\new_tdxqh\vipdoc\ds\minline\csv")
+        self.csv_path_button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("选择路径"))
+        self.csv_path_button.clicked.connect(self.select_csv_path)
+        self.csv_path_line.setEnabled(False)
+        self.csv_path_button.setEnabled(False)
 
         self.interval_combo: QtWidgets.QComboBox = QtWidgets.QComboBox()
         for interval in Interval:
@@ -129,6 +257,15 @@ class BacktesterManager(QtWidgets.QWidget):
         downloading_button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("下载数据"))
         downloading_button.clicked.connect(self.start_downloading)
 
+        clear_cache_button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("清除缓存"))
+        clear_cache_button.clicked.connect(self.clear_csv_cache)
+
+        cache_info_button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("缓存情况"))
+        cache_info_button.clicked.connect(self.show_cache_info)
+
+        stop_optimization_button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("结束优化"))
+        stop_optimization_button.clicked.connect(self.stop_optimization)
+
         self.order_button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("委托记录"))
         self.order_button.clicked.connect(self.show_backtesting_orders)
         self.order_button.setEnabled(False)
@@ -163,7 +300,10 @@ class BacktesterManager(QtWidgets.QWidget):
         for button in [
             backtesting_button,
             optimization_button,
+            stop_optimization_button,
             downloading_button,
+            clear_cache_button,
+            cache_info_button,
             self.result_button,
             self.order_button,
             self.trade_button,
@@ -181,6 +321,14 @@ class BacktesterManager(QtWidgets.QWidget):
         form.addRow(_("交易策略"), self.class_combo)
         form.addRow(_("本地代码"), self.symbol_line)
         form.addRow(_("K线周期"), self.interval_combo)
+        form.addRow(_("数据源"), self.data_source_combo)
+
+        # CSV path row with button
+        csv_path_layout = QtWidgets.QHBoxLayout()
+        csv_path_layout.addWidget(self.csv_path_line)
+        csv_path_layout.addWidget(self.csv_path_button)
+        form.addRow(_("CSV路径"), csv_path_layout)
+
         form.addRow(_("开始日期"), self.start_date_edit)
         form.addRow(_("结束日期"), self.end_date_edit)
         form.addRow(_("手续费率"), self.rate_line)
@@ -206,6 +354,12 @@ class BacktesterManager(QtWidgets.QWidget):
         left_vbox.addWidget(self.save_trades_separately_checkbox)
         left_vbox.addWidget(backtesting_button)
         left_vbox.addWidget(downloading_button)
+        left_vbox.addWidget(clear_cache_button)
+        left_vbox.addWidget(cache_info_button)
+        left_vbox.addStretch()
+        left_vbox.addWidget(optimization_button)
+        left_vbox.addWidget(stop_optimization_button)
+        left_vbox.addWidget(self.result_button)
         left_vbox.addStretch()
         left_vbox.addLayout(result_grid)
         left_vbox.addStretch()
@@ -270,6 +424,30 @@ class BacktesterManager(QtWidgets.QWidget):
         hbox.addWidget(right_widget)
         self.setLayout(hbox)
 
+    def on_data_source_changed(self) -> None:
+        """Handle data source selection change"""
+        data_source = self.data_source_combo.currentData()
+        is_csv = data_source == "csv"
+
+        # Enable/disable CSV path controls based on selection
+        self.csv_path_line.setEnabled(is_csv)
+        self.csv_path_button.setEnabled(is_csv)
+
+    def select_csv_path(self) -> None:
+        """Select CSV directory path"""
+        current_path = self.csv_path_line.text()
+        if not current_path:
+            current_path = r"C:\new_tdxqh\vipdoc\ds\minline\csv"
+
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, _("选择CSV数据目录"), current_path
+        )
+
+        if path:
+            self.csv_path_line.setText(path)
+            # Update symbol completion when CSV path changes
+            self.update_symbol_completion()
+
     def save_backtesting_setting(self) -> None:
         """
         Save current backtesting parameters to a user-selected JSON file.
@@ -278,6 +456,8 @@ class BacktesterManager(QtWidgets.QWidget):
         class_name = self.class_combo.currentText()
         vt_symbol = self.symbol_line.text()
         interval = self.interval_combo.currentText()
+        data_source = self.data_source_combo.currentData()
+        csv_path = self.csv_path_line.text()
         start_date = self.start_date_edit.date().toString("yyyy-MM-dd")
         end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
         rate = float(self.rate_line.text())
@@ -291,6 +471,8 @@ class BacktesterManager(QtWidgets.QWidget):
             "class_name": class_name,
             "vt_symbol": vt_symbol,
             "interval": interval,
+            "data_source": data_source,
+            "csv_path": csv_path,
             "start": start_date,
             "end": end_date,
             "rate": rate,
@@ -348,6 +530,17 @@ class BacktesterManager(QtWidgets.QWidget):
                 self.interval_combo.findText(setting["interval"])
             )
 
+        if "data_source" in setting:
+            index = self.data_source_combo.findData(setting["data_source"])
+            if index >= 0:
+                self.data_source_combo.setCurrentIndex(index)
+                self.on_data_source_changed()  # Update UI state
+
+        if "csv_path" in setting:
+            self.csv_path_line.setText(setting["csv_path"])
+            # Update symbol completion after loading CSV path
+            self.update_symbol_completion()
+
         if "start" in setting:
             start_dt: QtCore.QDate = QtCore.QDate.fromString(setting["start"], "yyyy-MM-dd")
             self.start_date_edit.setDate(start_dt)
@@ -398,6 +591,19 @@ class BacktesterManager(QtWidgets.QWidget):
             index = self.interval_combo.findText(setting["interval"])
             if index >= 0:
                 self.interval_combo.setCurrentIndex(index)
+
+        # Set data source
+        if "data_source" in setting:
+            index = self.data_source_combo.findData(setting["data_source"])
+            if index >= 0:
+                self.data_source_combo.setCurrentIndex(index)
+                self.on_data_source_changed()  # Update UI state
+
+        # Set CSV path
+        if "csv_path" in setting:
+            self.csv_path_line.setText(setting["csv_path"])
+            # Update symbol completion after loading CSV path
+            self.update_symbol_completion()
 
         # Set start date
         start_str: str = setting.get("start", "")
@@ -524,6 +730,8 @@ class BacktesterManager(QtWidgets.QWidget):
 
         vt_symbol: str = self.symbol_line.text()
         interval: str = self.interval_combo.currentText()
+        data_source: str = self.data_source_combo.currentData()
+        csv_path: str = self.csv_path_line.text()
         start: datetime = cast(datetime, self.start_date_edit.dateTime().toPython())
         end: datetime = cast(datetime, self.end_date_edit.dateTime().toPython())
         rate: float = float(self.rate_line.text())
@@ -547,6 +755,8 @@ class BacktesterManager(QtWidgets.QWidget):
             "class_name": class_name,
             "vt_symbol": vt_symbol,
             "interval": interval,
+            "data_source": data_source,
+            "csv_path": csv_path,
             "start": start.strftime("%Y-%m-%d"),
             "rate": rate,
             "slippage": slippage,
@@ -577,6 +787,10 @@ class BacktesterManager(QtWidgets.QWidget):
         self.current_class_name = class_name
         self.current_vt_symbol = vt_symbol
         self.backtester_engine.chart = self.chart
+
+        # Set data source information
+        self.backtester_engine.data_source = data_source
+        self.backtester_engine.csv_path = csv_path
 
         result: bool = self.backtester_engine.start_backtesting(
             class_name,
@@ -611,6 +825,8 @@ class BacktesterManager(QtWidgets.QWidget):
         class_name: str = self.class_combo.currentText()
         vt_symbol: str = self.symbol_line.text()
         interval: str = self.interval_combo.currentText()
+        data_source: str = self.data_source_combo.currentData()
+        csv_path: str = self.csv_path_line.text()
         start: datetime = cast(datetime, self.start_date_edit.dateTime().toPython())
         end: datetime = cast(datetime, self.end_date_edit.dateTime().toPython())
         rate: float = float(self.rate_line.text())
@@ -627,6 +843,10 @@ class BacktesterManager(QtWidgets.QWidget):
 
         optimization_setting, use_ga, max_workers = dialog.get_setting()
         self.target_display = dialog.target_display
+
+        # Set data source information for optimization
+        self.backtester_engine.data_source = data_source
+        self.backtester_engine.csv_path = csv_path
 
         self.backtester_engine.start_optimization(
             class_name,
@@ -677,15 +897,84 @@ class BacktesterManager(QtWidgets.QWidget):
             end
         )
 
+    def clear_csv_cache(self) -> None:
+        """
+        Clear the CSV data cache.
+        """
+        cache_info = self.backtester_engine.get_csv_cache_info()
+        cache_size = cache_info.get("cached_keys", 0)
+
+        if cache_size == 0:
+            QtWidgets.QMessageBox.information(
+                self, _("提示"), _("CSV缓存已为空")
+            )
+            return
+
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            _("确认清除缓存"),
+            _("确定要清除CSV数据缓存吗？\n\n当前缓存了 {} 个数据集合，共 {} 条记录。".format(
+                cache_info.get("cached_keys", 0),
+                cache_info.get("total_records", 0)
+            )),
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+        )
+
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.backtester_engine.clear_csv_cache()
+            QtWidgets.QMessageBox.information(
+                self, _("成功"), _("CSV数据缓存已清除")
+            )
+
+    def show_cache_info(self) -> None:
+        """
+        Show CSV cache information in a dialog.
+        """
+        cache_info = self.backtester_engine.get_csv_cache_info()
+
+        if not cache_info.get("cached_keys", 0):
+            QtWidgets.QMessageBox.information(
+                self, _("缓存情况"), _("当前没有缓存的CSV数据")
+            )
+            return
+
+        # Create dialog to show cache information
+        dialog = CacheInfoDialog(cache_info, self)
+        dialog.exec_()
+
+    def stop_optimization(self) -> None:
+        """
+        Stop the current optimization task.
+        """
+        success = self.backtester_engine.stop_optimization()
+        if success:
+            QtWidgets.QMessageBox.information(
+                self, _("成功"), _("优化任务已停止")
+            )
+        else:
+            QtWidgets.QMessageBox.warning(
+                self, _("警告"), _("当前没有正在运行的优化任务")
+            )
+
     def show_optimization_result(self) -> None:
         """"""
         result_values: list | None = self.backtester_engine.get_result_values()
         if result_values is None:
             return
 
+        # Get current optimization parameters for filename generation
+        class_name: str = self.class_combo.currentText()
+        vt_symbol: str = self.symbol_line.text()
+        start_date: str = self.start_date_edit.date().toString("yyyy-MM-dd")
+        end_date: str = self.end_date_edit.date().toString("yyyy-MM-dd")
+
         dialog: OptimizationResultMonitor = OptimizationResultMonitor(
             result_values,
-            self.target_display
+            self.target_display,
+            class_name,
+            vt_symbol,
+            start_date,
+            end_date
         )
         dialog.exec_()
 
@@ -1580,81 +1869,315 @@ class OptimizationResultMonitor(QtWidgets.QDialog):
     """
 
     def __init__(
-        self, result_values: list, target_display: str
+        self, result_values: list, target_display: str,
+        class_name: str = "", vt_symbol: str = "", start_date: str = "", end_date: str = ""
     ) -> None:
         """"""
         super().__init__()
 
         self.result_values: list = result_values
         self.target_display: str = target_display
+        self.show_detailed_stats: bool = False
+        self.class_name: str = class_name
+        self.vt_symbol: str = vt_symbol
+        self.start_date: str = start_date
+        self.end_date: str = end_date
 
         self.init_ui()
 
     def init_ui(self) -> None:
         """"""
         self.setWindowTitle(_("参数优化结果"))
-        self.resize(1100, 500)
+        self.resize(1800, 600)
 
-        # Creat table to show result
-        table: QtWidgets.QTableWidget = QtWidgets.QTableWidget()
+        # Create controls layout
+        controls_layout = QtWidgets.QHBoxLayout()
 
-        table.setColumnCount(2)
-        table.setRowCount(len(self.result_values))
-        table.setHorizontalHeaderLabels([_("参数"), self.target_display])
-        table.setEditTriggers(table.EditTrigger.NoEditTriggers)
-        table.verticalHeader().setVisible(False)
+        # Checkbox to toggle detailed statistics view
+        self.detailed_checkbox = QtWidgets.QCheckBox(_("显示详细统计"))
+        self.detailed_checkbox.stateChanged.connect(self.toggle_detailed_view)
+        # Also connect clicked signal as backup
+        self.detailed_checkbox.clicked.connect(self.toggle_detailed_view_clicked)
+        controls_layout.addWidget(self.detailed_checkbox)
 
-        table.horizontalHeader().setSectionResizeMode(
+        controls_layout.addStretch()
+
+        # Create table to show result
+        self.table: QtWidgets.QTableWidget = QtWidgets.QTableWidget()
+        self.update_table_content()
+
+        # Create buttons
+        button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("保存"))
+        button.clicked.connect(self.save_csv)
+
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addStretch()
+        button_layout.addWidget(button)
+
+        # Create main layout
+        layout = QtWidgets.QVBoxLayout()
+        layout.addLayout(controls_layout)
+        layout.addWidget(self.table)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def update_table_content(self) -> None:
+        """Update table content based on current view mode."""
+        print(f"DEBUG: update_table_content called, show_detailed_stats: {self.show_detailed_stats}")
+
+        # Clear the entire table and rebuild it
+        self.table.clear()
+
+        if self.show_detailed_stats:
+            print("DEBUG: Setting up detailed table")
+            self._setup_detailed_table()
+        else:
+            print("DEBUG: Setting up simple table")
+            self._setup_simple_table()
+
+    def _setup_simple_table(self) -> None:
+        """Setup table for simple view (parameters + target value)."""
+        self.table.setColumnCount(2)
+        self.table.setRowCount(len(self.result_values))
+        self.table.setHorizontalHeaderLabels([_("参数"), self.target_display])
+
+        self.table.horizontalHeader().setSectionResizeMode(
             0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
         )
-        table.horizontalHeader().setSectionResizeMode(
+        self.table.horizontalHeader().setSectionResizeMode(
             1, QtWidgets.QHeaderView.ResizeMode.Stretch
         )
 
         for n, tp in enumerate(self.result_values):
             setting, target_value, __ = tp
             setting_cell: QtWidgets.QTableWidgetItem = QtWidgets.QTableWidgetItem(str(setting))
-            target_cell: QtWidgets.QTableWidgetItem = QtWidgets.QTableWidgetItem(f"{target_value:.2f}")
+            target_cell: QtWidgets.QTableWidgetItem = QtWidgets.QTableWidgetItem(f"{target_value:.4f}")
 
             setting_cell.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             target_cell.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
-            table.setItem(n, 0, setting_cell)
-            table.setItem(n, 1, target_cell)
+            self.table.setItem(n, 0, setting_cell)
+            self.table.setItem(n, 1, target_cell)
 
-        # Create layout
-        button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("保存"))
-        button.clicked.connect(self.save_csv)
+    def _setup_detailed_table(self) -> None:
+        """Setup table for detailed statistics view."""
+        # Define the statistics columns we want to show - match backtest statistics exactly
+        stat_columns = [
+            ("参数", "setting"),
+            ("目标值", "target_value"),
+            ("首个交易日", "start_date"),
+            ("最后交易日", "end_date"),
+            ("总交易日", "total_days"),
+            ("盈利交易日", "profit_days"),
+            ("亏损交易日", "loss_days"),
+            ("起始资金", "capital"),
+            ("结束资金", "end_balance"),
+            ("总收益率", "total_return"),
+            ("年化收益", "annual_return"),
+            ("最大回撤", "max_drawdown"),
+            ("百分比最大回撤", "max_ddpercent"),
+            ("最大回撤天数", "max_drawdown_duration"),
+            ("总盈亏", "total_net_pnl"),
+            ("总手续费", "total_commission"),
+            ("总滑点", "total_slippage"),
+            ("总成交额", "total_turnover"),
+            ("总成交笔数", "total_trade_count"),
+            ("日均盈亏", "daily_net_pnl"),
+            ("日均手续费", "daily_commission"),
+            ("日均滑点", "daily_slippage"),
+            ("日均成交额", "daily_turnover"),
+            ("日均成交笔数", "daily_trade_count"),
+            ("日均收益率", "daily_return"),
+            ("收益标准差", "return_std"),
+            ("夏普比率", "sharpe_ratio"),
+            ("EWM夏普", "ewm_sharpe"),
+            ("收益回撤比", "return_drawdown_ratio")
+        ]
 
-        hbox: QtWidgets.QHBoxLayout = QtWidgets.QHBoxLayout()
-        hbox.addStretch()
-        hbox.addWidget(button)
+        self.table.setColumnCount(len(stat_columns))
+        self.table.setRowCount(len(self.result_values))
+        self.table.setHorizontalHeaderLabels([col[0] for col in stat_columns])
 
-        vbox: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
-        vbox.addWidget(table)
-        vbox.addLayout(hbox)
+        # Set column resize modes - allow all columns to be manually resized
+        for i, (header, _) in enumerate(stat_columns):
+            self.table.horizontalHeader().setSectionResizeMode(
+                i, QtWidgets.QHeaderView.ResizeMode.Interactive
+            )
 
-        self.setLayout(vbox)
+            # Set reasonable default column widths
+            if header in ["参数", "目标值"]:
+                self.table.setColumnWidth(i, 120)
+            elif header in ["首个交易日", "最后交易日"]:
+                self.table.setColumnWidth(i, 100)
+            elif header in ["总交易日", "盈利交易日", "亏损交易日", "最大回撤天数", "总成交笔数"]:
+                self.table.setColumnWidth(i, 90)
+            elif header in ["起始资金", "结束资金", "总收益率", "年化收益", "最大回撤", "百分比最大回撤"]:
+                self.table.setColumnWidth(i, 110)
+            elif header in ["总盈亏", "总手续费", "总滑点", "总成交额"]:
+                self.table.setColumnWidth(i, 100)
+            elif header in ["日均盈亏", "日均手续费", "日均滑点", "日均成交额", "日均成交笔数"]:
+                self.table.setColumnWidth(i, 100)
+            elif header in ["日均收益率", "收益标准差"]:
+                self.table.setColumnWidth(i, 100)
+            elif header in ["夏普比率", "EWM夏普", "收益回撤比"]:
+                self.table.setColumnWidth(i, 90)
+
+        for n, tp in enumerate(self.result_values):
+            setting, target_value, statistics = tp
+
+            for col_idx, (header, stat_key) in enumerate(stat_columns):
+                if stat_key == "setting":
+                    value = str(setting)
+                elif stat_key == "target_value":
+                    value = f"{target_value:.4f}"
+                else:
+                    # Get value from statistics dict and format like backtest statistics
+                    stat_value = statistics.get(stat_key, 0)
+                    if isinstance(stat_value, float):
+                        if stat_key in ["start_date", "end_date"]:
+                            # Date formatting
+                            value = str(stat_value) if stat_value else ""
+                        elif stat_key in ["capital", "end_balance"]:
+                            # Currency formatting with commas
+                            value = f"{stat_value:,.2f}"
+                        elif stat_key in ["total_return", "annual_return", "max_ddpercent", "daily_return", "return_std"]:
+                            # Percentage formatting
+                            value = f"{stat_value:.2f}%" if stat_value != 0 else "0.00%"
+                        elif stat_key in ["max_drawdown", "total_net_pnl", "total_commission", "total_slippage", "total_turnover",
+                                        "daily_net_pnl", "daily_commission", "daily_slippage", "daily_turnover"]:
+                            # Currency formatting
+                            value = f"{stat_value:.2f}"
+                        elif stat_key in ["sharpe_ratio", "ewm_sharpe", "return_drawdown_ratio"]:
+                            # Ratio formatting with 4 decimal places
+                            value = f"{stat_value:.4f}"
+                        elif stat_key in ["daily_trade_count"]:
+                            # Count formatting
+                            value = f"{stat_value:.2f}"
+                        else:
+                            # Integer values (days, counts)
+                            value = str(int(stat_value)) if stat_value == int(stat_value) else f"{stat_value:.2f}"
+                    else:
+                        value = str(stat_value)
+
+                cell = QtWidgets.QTableWidgetItem(value)
+                cell.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(n, col_idx, cell)
+
+    def toggle_detailed_view(self, state: int) -> None:
+        """Toggle between simple and detailed statistics view."""
+        # Debug: Print state value
+        print(f"DEBUG: toggle_detailed_view called with state: {state}")
+
+        # Simple check: state == 2 means checked, state == 0 means unchecked
+        self.show_detailed_stats = (state == 2)
+
+        print(f"DEBUG: show_detailed_stats set to: {self.show_detailed_stats}")
+        self.update_table_content()
+
+    def toggle_detailed_view_clicked(self) -> None:
+        """Toggle detailed view when checkbox is clicked."""
+        self.show_detailed_stats = self.detailed_checkbox.isChecked()
+        print(f"DEBUG: toggle_detailed_view_clicked - show_detailed_stats: {self.show_detailed_stats}")
+        self.update_table_content()
 
     def save_csv(self) -> None:
         """
         Save table data into a csv file
         """
+        # Generate default path and filename
+        default_dir = r"C:\Users\Administrator\.vntrader\backtestresult\optimize"
+
+        # Ensure directory exists
+        os.makedirs(default_dir, exist_ok=True)
+
+        # Generate filename: strategy_name + start_date + to + end_date + symbol + current_time
+        current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Clean dates to remove hyphens for filename
+        start_date_clean = self.start_date.replace("-", "") if self.start_date else ""
+        end_date_clean = self.end_date.replace("-", "") if self.end_date else ""
+
+        # Clean symbol to remove exchange suffix for filename
+        symbol_clean = self.vt_symbol.split('.')[0] if self.vt_symbol else ""
+
+        # Build filename
+        filename_parts = []
+        if self.class_name:
+            filename_parts.append(self.class_name)
+        if start_date_clean and end_date_clean:
+            filename_parts.append(f"{start_date_clean}to{end_date_clean}")
+        if symbol_clean:
+            filename_parts.append(symbol_clean)
+        filename_parts.append(current_time)
+
+        default_filename = "_".join(filename_parts) + ".csv"
+        default_path = os.path.join(default_dir, default_filename)
+
         path, __ = QtWidgets.QFileDialog.getSaveFileName(
-            self, _("保存数据"), "", "CSV(*.csv)")
+            self, _("保存数据"), default_path, "CSV(*.csv)")
 
         if not path:
             return
 
-        with open(path, "w") as f:
-            writer = csv.writer(f, lineterminator="\n")
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
 
-            writer.writerow([_("参数"), self.target_display])
+            if self.show_detailed_stats:
+                # Save detailed statistics - match backtest statistics exactly
+                headers = [
+                    "参数", "目标值", "首个交易日", "最后交易日", "总交易日", "盈利交易日", "亏损交易日",
+                    "起始资金", "结束资金", "总收益率", "年化收益", "最大回撤", "百分比最大回撤", "最大回撤天数",
+                    "总盈亏", "总手续费", "总滑点", "总成交额", "总成交笔数",
+                    "日均盈亏", "日均手续费", "日均滑点", "日均成交额", "日均成交笔数",
+                    "日均收益率", "收益标准差", "夏普比率", "EWM夏普", "收益回撤比"
+                ]
+                writer.writerow(headers)
 
-            for tp in self.result_values:
-                setting, target_value, __ = tp
-                row_data: list = [str(setting), str(target_value)]
-                writer.writerow(row_data)
+                for tp in self.result_values:
+                    setting, target_value, statistics = tp
+
+                    # Format data to match backtest statistics display
+                    row_data = [
+                        str(setting),
+                        f"{target_value:.4f}",
+                        str(statistics.get('start_date', '')),
+                        str(statistics.get('end_date', '')),
+                        statistics.get('total_days', 0),
+                        statistics.get('profit_days', 0),
+                        statistics.get('loss_days', 0),
+                        f"{statistics.get('capital', 0):,.2f}",
+                        f"{statistics.get('end_balance', 0):,.2f}",
+                        f"{statistics.get('total_return', 0):.2f}%",
+                        f"{statistics.get('annual_return', 0):.2f}%",
+                        f"{statistics.get('max_drawdown', 0):.2f}",
+                        f"{statistics.get('max_ddpercent', 0):.2f}%",
+                        statistics.get('max_drawdown_duration', 0),
+                        f"{statistics.get('total_net_pnl', 0):.2f}",
+                        f"{statistics.get('total_commission', 0):.2f}",
+                        f"{statistics.get('total_slippage', 0):.2f}",
+                        f"{statistics.get('total_turnover', 0):.2f}",
+                        statistics.get('total_trade_count', 0),
+                        f"{statistics.get('daily_net_pnl', 0):.2f}",
+                        f"{statistics.get('daily_commission', 0):.2f}",
+                        f"{statistics.get('daily_slippage', 0):.2f}",
+                        f"{statistics.get('daily_turnover', 0):.2f}",
+                        f"{statistics.get('daily_trade_count', 0):.2f}",
+                        f"{statistics.get('daily_return', 0):.2f}%",
+                        f"{statistics.get('return_std', 0):.2f}%",
+                        f"{statistics.get('sharpe_ratio', 0):.4f}",
+                        f"{statistics.get('ewm_sharpe', 0):.4f}",
+                        f"{statistics.get('return_drawdown_ratio', 0):.4f}"
+                    ]
+                    writer.writerow(row_data)
+            else:
+                # Save simple view (original format)
+                writer.writerow([_("参数"), self.target_display])
+
+                for tp in self.result_values:
+                    setting, target_value, __ = tp
+                    row_data: list = [str(setting), f"{target_value:.4f}"]
+                    writer.writerow(row_data)
 
 
 class BacktestingTradeMonitor(BaseMonitor):
@@ -2040,3 +2563,201 @@ def generate_trade_pairs(trades: list) -> list:
             same_direction.append(trade)
 
     return trade_pairs
+
+
+class CacheInfoDialog(QtWidgets.QDialog):
+    """
+    Dialog for displaying CSV cache information.
+    """
+
+    def __init__(self, cache_info: dict, parent: QtWidgets.QWidget = None) -> None:
+        """"""
+        super().__init__(parent)
+
+        self.cache_info = cache_info
+        self.init_ui()
+
+    def init_ui(self) -> None:
+        """"""
+        self.setWindowTitle(_("CSV缓存情况"))
+        self.resize(800, 600)
+
+        # Debug: Print cache info
+        print(f"DEBUG: CacheInfoDialog received cache_info: {self.cache_info}")
+
+        # Create main layout
+        layout = QtWidgets.QVBoxLayout()
+
+        # Summary information
+        summary_group = QtWidgets.QGroupBox(_("缓存概览"))
+        summary_layout = QtWidgets.QFormLayout()
+
+        cached_keys = self.cache_info.get("cached_keys", 0)
+        total_records = self.cache_info.get("total_records", 0)
+
+        summary_layout.addRow(_("缓存条目数:"), QtWidgets.QLabel(str(cached_keys)))
+        summary_layout.addRow(_("总记录数:"), QtWidgets.QLabel(str(total_records)))
+        summary_layout.addRow(_("内存占用:"), QtWidgets.QLabel(self._estimate_memory_usage()))
+
+        summary_group.setLayout(summary_layout)
+        layout.addWidget(summary_group)
+
+        # Cache details table
+        details_group = QtWidgets.QGroupBox(_("缓存详情"))
+        details_layout = QtWidgets.QVBoxLayout()
+
+        # Create table
+        table = QtWidgets.QTableWidget()
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels([_("品种"), _("周期"), _("时间范围"), _("记录数")])
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+
+        # Set column widths
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+
+        # Populate table
+        cache_keys = self.cache_info.get("cache_keys", [])
+        print(f"DEBUG: Found {len(cache_keys)} cache keys to display")
+        table.setRowCount(len(cache_keys))
+
+        for row, cache_key in enumerate(cache_keys):
+            print(f"DEBUG: Processing row {row}, cache_key: {cache_key}")
+            # Parse cache key: {symbol}_{interval}_{start_time}_{end_time}
+            # Format: rb8888_MINUTE_20230101_090000_20230101_091000
+            parts = cache_key.split('_')
+            if len(parts) >= 4:
+                symbol = parts[0]
+                interval = parts[1]
+                start_time_str = parts[2] + "_" + parts[3]  # 20230101_090000
+                end_time_str = parts[4] + "_" + parts[5]    # 20230101_091000
+
+                # Format time range
+                try:
+                    start_formatted = f"{start_time_str[:8]} {start_time_str[9:11]}:{start_time_str[11:13]}:{start_time_str[13:]}"
+                    end_formatted = f"{end_time_str[:8]} {end_time_str[9:11]}:{end_time_str[11:13]}:{end_time_str[13:]}"
+                    time_range = f"{start_formatted} - {end_formatted}"
+                except:
+                    time_range = f"{start_time_str} - {end_time_str}"
+            else:
+                symbol = cache_key
+                interval = "Unknown"
+                time_range = "Unknown"
+
+            # Get record count for this cache entry
+            # Note: We don't have per-entry count in current implementation
+            # This would require modifying the cache structure
+            record_count = "N/A"
+
+            table.setItem(row, 0, QtWidgets.QTableWidgetItem(symbol))
+            table.setItem(row, 1, QtWidgets.QTableWidgetItem(interval))
+            table.setItem(row, 2, QtWidgets.QTableWidgetItem(time_range))
+            table.setItem(row, 3, QtWidgets.QTableWidgetItem(record_count))
+
+            print(f"DEBUG: Set row {row}: {symbol}, {interval}, {time_range}, {record_count}")
+
+        details_layout.addWidget(table)
+        details_group.setLayout(details_layout)
+        layout.addWidget(details_group)
+
+        # Buttons
+        buttons_layout = QtWidgets.QHBoxLayout()
+        buttons_layout.addStretch()
+
+        refresh_button = QtWidgets.QPushButton(_("刷新"))
+        refresh_button.clicked.connect(self.refresh_cache_info)
+        buttons_layout.addWidget(refresh_button)
+
+        close_button = QtWidgets.QPushButton(_("关闭"))
+        close_button.clicked.connect(self.accept)
+        buttons_layout.addWidget(close_button)
+
+        layout.addLayout(buttons_layout)
+
+        self.setLayout(layout)
+
+    def _estimate_memory_usage(self) -> str:
+        """Estimate memory usage of cache."""
+        total_records = self.cache_info.get("total_records", 0)
+
+        # Rough estimate: each record ~1KB
+        estimated_bytes = total_records * 1024
+
+        if estimated_bytes < 1024:
+            return f"{estimated_bytes} bytes"
+        elif estimated_bytes < 1024 * 1024:
+            return f"{estimated_bytes / 1024:.1f} KB"
+        else:
+            return f"{estimated_bytes / (1024 * 1024):.1f} MB"
+
+    def refresh_cache_info(self) -> None:
+        """Refresh cache information."""
+        # Get updated cache info
+        cache_info = self.parent().backtester_engine.get_csv_cache_info()
+
+        # Update summary
+        cached_keys = cache_info.get("cached_keys", 0)
+        total_records = cache_info.get("total_records", 0)
+
+        # Find and update summary labels
+        summary_group = self.findChild(QtWidgets.QGroupBox, _("缓存概览"))
+        if summary_group:
+            layout = summary_group.layout()
+            if layout and layout.rowCount() >= 3:
+                # Update cached keys
+                label = layout.itemAt(1, QtWidgets.QFormLayout.ItemRole.FieldRole).widget()
+                if label:
+                    label.setText(str(cached_keys))
+
+                # Update total records
+                label = layout.itemAt(3, QtWidgets.QFormLayout.ItemRole.FieldRole).widget()
+                if label:
+                    label.setText(str(total_records))
+
+                # Update memory usage
+                label = layout.itemAt(5, QtWidgets.QFormLayout.ItemRole.FieldRole).widget()
+                if label:
+                    label.setText(self._estimate_memory_usage())
+
+        # Update table
+        details_group = self.findChild(QtWidgets.QGroupBox, _("缓存详情"))
+        if details_group:
+            table = details_group.findChild(QtWidgets.QTableWidget)
+            if table:
+                cache_keys = cache_info.get("cache_keys", [])
+                table.setRowCount(len(cache_keys))
+
+                for row, cache_key in enumerate(cache_keys):
+                    # Same parsing logic as in init_ui
+                    # Format: rb8888_MINUTE_20230101_090000_20230101_091000
+                    parts = cache_key.split('_')
+                    if len(parts) >= 6:
+                        symbol = parts[0]
+                        interval = parts[1]
+                        start_time_str = parts[2] + "_" + parts[3]  # 20230101_090000
+                        end_time_str = parts[4] + "_" + parts[5]    # 20230101_091000
+
+                        try:
+                            start_formatted = f"{start_time_str[:8]} {start_time_str[9:11]}:{start_time_str[11:13]}:{start_time_str[13:]}"
+                            end_formatted = f"{end_time_str[:8]} {end_time_str[9:11]}:{end_time_str[11:13]}:{end_time_str[13:]}"
+                            time_range = f"{start_formatted} - {end_formatted}"
+                        except:
+                            time_range = f"{start_time_str} - {end_time_str}"
+                    else:
+                        symbol = cache_key
+                        interval = "Unknown"
+                        time_range = "Unknown"
+
+                    record_count = "N/A"
+
+                    table.setItem(row, 0, QtWidgets.QTableWidgetItem(symbol))
+                    table.setItem(row, 1, QtWidgets.QTableWidgetItem(interval))
+                    table.setItem(row, 2, QtWidgets.QTableWidgetItem(time_range))
+                    table.setItem(row, 3, QtWidgets.QTableWidgetItem(record_count))
+
+        QtWidgets.QMessageBox.information(self, _("成功"), _("缓存信息已刷新"))
