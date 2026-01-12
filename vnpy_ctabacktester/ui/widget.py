@@ -197,13 +197,17 @@ class BacktesterManager(QtWidgets.QWidget):
                 import re
                 match = re.match(r'^([a-zA-Z]+)', base_symbol)
                 if match:
-                    symbol_code = match.group(1).lower()
+                    extracted_code = match.group(1)
 
-                    # Special handling for certain futures that need specific casing
-                    if symbol_code in ['if', 'ih', 'ic', 'im']:
-                        symbol_code = symbol_code.upper()  # Index futures: IF, IH, IC, IM
-                    elif symbol_code in ['t', 'tf', 'tl', 'ts']:
-                        symbol_code = symbol_code.upper()  # Treasury futures: T, TF, TL, TS
+                    # Find the correct casing by matching against contract attributes keys (case-insensitive)
+                    symbol_code = extracted_code.lower()  # Default to lowercase
+
+                    # Check if the extracted code matches any key in contract_attributes (case-insensitive)
+                    for json_key in contract_attributes.keys():
+                        if json_key.lower() == extracted_code.lower():
+                            # Use the exact casing from the JSON file
+                            symbol_code = json_key
+                            break
 
             # Look up contract attributes
             if symbol_code in contract_attributes:
@@ -1064,7 +1068,7 @@ class BacktesterManager(QtWidgets.QWidget):
         else:
             QtWidgets.QMessageBox.warning(
                 self, _("警告"), _("当前没有正在运行的优化任务")
-            )
+        )
 
     def show_optimization_result(self) -> None:
         """"""
@@ -2284,10 +2288,10 @@ class OptimizationResultMonitor(QtWidgets.QDialog):
                 # Save simple view (original format)
                 writer.writerow([_("参数"), self.target_display])
 
-                for tp in self.result_values:
-                    setting, target_value, __ = tp
-                    row_data: list = [str(setting), f"{target_value:.4f}"]
-                    writer.writerow(row_data)
+            for tp in self.result_values:
+                setting, target_value, __ = tp
+                row_data: list = [str(setting), f"{target_value:.4f}"]
+                writer.writerow(row_data)
 
 
 class BacktestingTradeMonitor(BaseMonitor):
