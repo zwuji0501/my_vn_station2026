@@ -1,5 +1,8 @@
 import importlib
 import traceback
+import csv
+import os
+import json
 from collections import defaultdict
 from pathlib import Path
 from types import ModuleType
@@ -97,6 +100,21 @@ class CtaEngine(BaseEngine):
 
         self.database: BaseDatabase = get_database()
         self.datafeed: BaseDatafeed = get_datafeed()
+
+        # Data source settings
+        self.data_source: str = "csv"  # "database" or "csv"
+        self.csv_path: str = r"C:\new_tdxqh\vipdoc\ds\minline\csv"
+
+        # CSV interval mapping: UI interval -> CSV filename suffix
+        self.csv_interval_mapping = {
+            "1m": "1m",
+            "5m": "5m",
+            "15m": "15m",
+            "30m": "30m",
+            "1h": "1h",
+            "4h": "4h",
+            "d": "d"
+        }
 
     def init_engine(self) -> None:
         """"""
@@ -560,22 +578,38 @@ class CtaEngine(BaseEngine):
 
         # Pass gateway and datafeed if use_database set to True
         if not use_database:
-            # Query bars from gateway if available
-            contract: ContractData | None = self.main_engine.get_contract(vt_symbol)
+            # Check data source setting
+            if self.data_source == "csv":
+                # Load data from CSV files
+                interval_str = ""
+                if interval == Interval.MINUTE:
+                    interval_str = "1m"  # Default to 1m, could be extended to support different minute intervals
+                elif interval == Interval.HOUR:
+                    interval_str = "1h"  # Default to 1h
+                elif interval == Interval.DAILY:
+                    interval_str = "d"
+                else:
+                    # Map interval enum to string for CSV loading
+                    interval_str = interval.value if hasattr(interval, 'value') else str(interval)
 
-            if contract and contract.history_data:
-                req: HistoryRequest = HistoryRequest(
-                    symbol=symbol,
-                    exchange=exchange,
-                    interval=interval,
-                    start=start,
-                    end=end
-                )
-                bars = self.main_engine.query_history(req, contract.gateway_name)
-
-            # Try to query bars from datafeed, if not found, load from database.
+                bars = self.load_csv_data(vt_symbol, interval_str, start, end)
             else:
-                bars = self.query_bar_from_datafeed(symbol, exchange, interval, start, end)
+                # Query bars from gateway if available
+                contract: ContractData | None = self.main_engine.get_contract(vt_symbol)
+
+                if contract and contract.history_data:
+                    req: HistoryRequest = HistoryRequest(
+                        symbol=symbol,
+                        exchange=exchange,
+                        interval=interval,
+                        start=start,
+                        end=end
+                    )
+                    bars = self.main_engine.query_history(req, contract.gateway_name)
+
+                # Try to query bars from datafeed, if not found, load from database.
+                else:
+                    bars = self.query_bar_from_datafeed(symbol, exchange, interval, start, end)
 
         if not bars:
             bars = self.database.load_bar_data(
@@ -587,6 +621,194 @@ class CtaEngine(BaseEngine):
             )
 
         return bars
+
+    def load_csv_data(self, vt_symbol: str, interval: str, start: datetime, end: datetime) -> list[BarData]:
+        """
+        Load data from CSV files for strategy initialization.
+
+        Args:
+            vt_symbol: Symbol like "rb8888.SHFE"
+            interval: Interval string like "1m", "5m", "1h", "d"
+            start: Start datetime
+            end: End datetime
+
+        Returns:
+            list[BarData]: List of bar data loaded from CSV
+        """
+        try:
+            # Extract symbol from vt_symbol (remove exchange part)
+            symbol = vt_symbol.split('.')[0] if '.' in vt_symbol else vt_symbol
+
+            # Construct CSV filename with new format: symbol_exchange_interval.csv
+            # Extract exchange from vt_symbol (format: symbol.exchange)
+            exchange = ""
+            if '.' in vt_symbol:
+                parts = vt_symbol.split('.')
+                if len(parts) >= 2:
+                    exchange = parts[1]
+
+            # Get CSV interval suffix from mapping
+            csv_interval = self.csv_interval_mapping.get(interval, interval)
+
+            # Construct filename: symbol_exchange_interval.csv
+            csv_filename = f"{symbol}_{exchange}_{csv_interval}.csv"
+            csv_filepath = os.path.join(self.csv_path, csv_filename)
+
+            if not os.path.exists(csv_filepath):
+                self.write_log(_("CSV文件不存在: {}").format(csv_filepath))
+                return []
+
+            self.write_log(_("从CSV文件加载数据: {}").format(csv_filepath))
+
+            # Load data from CSV
+            history_data = self._load_history_from_csv(csv_filepath, vt_symbol, interval, start, end)
+
+            if not history_data:
+                self.write_log(_("CSV文件中没有找到有效数据"))
+                return []
+
+            self.write_log(_("成功加载 {} 条数据记录").format(len(history_data)))
+
+            return history_data
+
+        except Exception as e:
+            self.write_log(_("CSV数据加载失败: {}").format(str(e)))
+            import traceback
+            traceback.print_exc()
+            return []
+
+    def _load_history_from_csv(self, csv_filepath: str, vt_symbol: str, interval: str, start: datetime, end: datetime):
+        """
+        Load history data from CSV file.
+
+        Expected CSV format with headers:
+        datetime,open,high,low,close,volume,turnover,open_interest
+        Example: 2025-05-20 21:00:00,4102.0,4102.0,4102.0,4102.0,1.0,0,12.0
+        """
+        history_data = []
+
+        try:
+            with open(csv_filepath, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+
+                # Load contract attribute mapping from JSON file
+                contract_attributes = self._load_contract_attributes()
+
+                for row in reader:
+                    try:
+                        # Parse datetime
+                        dt_str = row['datetime']
+                        dt_naive = datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S')
+
+                        # Convert to timezone-aware datetime if start/end are timezone-aware
+                        if start.tzinfo is not None:
+                            dt = dt_naive.replace(tzinfo=start.tzinfo)
+                        else:
+                            dt = dt_naive
+
+                        # Filter by date range
+                        if dt < start or dt > end:
+                            continue
+
+                        # Get exchange enum from contract attributes or fallback
+                        exchange = self._get_exchange_from_contract_attributes(vt_symbol, contract_attributes)
+
+                        # Get interval enum - map UI intervals to vn.py Interval enums
+                        if interval in ["1m", "5m", "15m", "30m"]:
+                            interval_enum = Interval.MINUTE
+                        elif interval in ["1h", "4h"]:
+                            interval_enum = Interval.HOUR
+                        elif interval == "d":
+                            interval_enum = Interval.DAILY
+                        elif interval == "w":
+                            interval_enum = Interval.WEEKLY
+                        elif interval == "tick":
+                            interval_enum = Interval.TICK
+                        else:
+                            interval_enum = Interval.MINUTE  # Default to MINUTE
+
+                        # Create BarData object
+                        bar = BarData(
+                            symbol=vt_symbol.split('.')[0],
+                            exchange=exchange,
+                            datetime=dt,
+                            interval=interval_enum,
+                            volume=float(row['volume']),
+                            turnover=float(row.get('turnover', 0)),
+                            open_interest=float(row.get('open_interest', 0)),
+                            open_price=float(row['open']),
+                            high_price=float(row['high']),
+                            low_price=float(row['low']),
+                            close_price=float(row['close']),
+                            gateway_name="CSV"
+                        )
+
+                        history_data.append(bar)
+
+                    except (ValueError, KeyError) as e:
+                        # Skip invalid rows but continue processing
+                        continue
+
+            # Sort by datetime
+            history_data.sort(key=lambda x: x.datetime)
+
+            return history_data
+
+        except Exception as e:
+            self.write_log(_("CSV文件解析失败: {}").format(str(e)))
+            return []
+
+    def _load_contract_attributes(self):
+        """
+        Load contract attributes from JSON file.
+        """
+        contract_json_path = os.path.join(self.csv_path, "contract_attribute.json")
+
+        try:
+            with open(contract_json_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            self.write_log(f"无法加载合约属性文件 {contract_json_path}: {e}")
+            return {}
+
+    def _get_exchange_from_contract_attributes(self, vt_symbol: str, contract_attributes: dict):
+        """
+        Get exchange enum from contract attributes.
+
+        Args:
+            vt_symbol: Symbol like "rb8888.SHFE"
+            contract_attributes: Contract attributes dictionary from JSON
+
+        Returns:
+            Exchange enum
+        """
+        # Extract symbol (remove exchange part if present)
+        symbol = vt_symbol.split('.')[0] if '.' in vt_symbol else vt_symbol
+
+        # Try to find contract in attributes
+        if symbol in contract_attributes:
+            contract_info = contract_attributes[symbol]
+            exchange_str = contract_info.get('exchange')
+
+            if exchange_str:
+                try:
+                    return Exchange[exchange_str]
+                except KeyError:
+                    self.write_log(f"未知交易所代码: {exchange_str}，使用默认交易所SHFE")
+                    return Exchange.SHFE
+
+        # Fallback: try to extract from vt_symbol
+        if '.' in vt_symbol:
+            exchange_str = vt_symbol.split('.')[1]
+            try:
+                return Exchange[exchange_str]
+            except KeyError:
+                self.write_log(f"无法识别交易所: {vt_symbol}，使用默认交易所SHFE")
+                return Exchange.SHFE
+        else:
+            # If no exchange in vt_symbol and not found in attributes, use SHFE as default
+            self.write_log(f"合约 {symbol} 未找到交易所信息，使用默认交易所SHFE")
+            return Exchange.SHFE
 
     def load_tick(
         self,
