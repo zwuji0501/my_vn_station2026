@@ -7,6 +7,7 @@
 # 允许vnpy相关的文件夹
 !vnpy/
 !vnpy_*/
+!vnpy_ctastrategy/
 
 # 忽略dist-info文件夹
 *.dist-info/
